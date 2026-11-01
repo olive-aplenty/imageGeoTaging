@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17232f">
+  <title>Picture GeoTagger Web</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="styles.css?v=2">
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.4/piexif.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script defer src="app.js?v=coords-dms-3"></script>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">BILDER EINZELN PRÜFEN</p>
+        <h1>Picture GeoTagger</h1>
+      </div>
+      <div class="folder-actions">
+        <button class="button secondary" id="choose-images">Bilder hochladen</button>
+        <input id="file-input" type="file" accept=".jpg,.jpeg,image/jpeg" multiple hidden>
+        <span class="folder-label" id="folder-label">Noch kein Ordner gewählt</span>
+      </div>
+    </header>
+
+    <section class="settings-row">
+      <label for="locality">Ort für die Adresssuche</label>
+      <input id="locality" value="Maria Rain, Österreich">
+      <span>Die Suche wird für das angezeigte Bild einzeln gestartet.</span>
+    </section>
+
+    <section class="notice-row">
+      <div id="status" role="status">Öffne einen Bildordner. Pro Durchgang werden bis zu 10 JPG-Bilder bearbeitet.</div>
+      <div class="progress-wrap"><div id="progress-bar"></div></div>
+    </section>
+
+    <section id="empty-state" class="empty-state">
+      <div class="empty-icon">⌖</div>
+      <h2>Bereit für die Bildprüfung</h2>
+      <p>Wähle einen Ordner mit JPG-Bildern oder bis zu 10 einzelne Bilder.</p>
+      <p class="subtle">Die Bilder bleiben auf diesem Computer. Nur die ausdrücklich gestartete Adresssuche wird online angefragt.</p>
+    </section>
+
+    <section id="review" class="review hidden">
+      <nav class="review-nav" aria-label="Bildnavigation">
+        <button class="button secondary" id="previous">← Zurück</button>
+        <button class="button secondary" id="next">Nächstes Bild →</button>
+        <button class="button secondary hidden" id="reprocess">Trotzdem erneut bearbeiten</button>
+        <span id="counter" class="counter"></span>
+        <button class="button primary" id="save">Prüfen &amp; nach Erledigt verschieben</button>
+      </nav>
+
+      <div class="review-grid">
+        <section class="card image-card">
+          <div class="card-heading">
+            <div><h2 id="file-name">Bild</h2><span id="image-status" class="status-chip">Wird vorbereitet</span></div>
+            <button class="text-button" id="open-original">Original groß öffnen ↗</button>
+          </div>
+          <button class="image-button" id="image-button" title="Originalbild groß öffnen">
+            <img id="photo" alt="Originalbild zur Prüfung">
+          </button>
+        </section>
+
+        <section class="card data-card">
+          <h2>Erkannte Bilddaten</h2>
+          <div class="data-section">
+            <h3>Gefundene Koordinaten aus dem Bild</h3>
+            <p id="raw-coordinate" class="raw-coordinate">Noch nicht erkannt</p>
+            <p id="image-coordinate" class="coordinate-value">—</p>
+          </div>
+          <div class="data-section">
+            <h3>Adressen auf dem Bild</h3>
+            <div id="address-candidates" class="candidate-list"></div>
+            <div class="address-search">
+              <input id="address-input" placeholder="Adresse aus dem Bild oder manuell eingeben">
+              <button class="button secondary" id="search-address">Adresse suchen</button>
+            </div>
+            <p id="address-coordinate" class="coordinate-value">Koordinaten durch Adresse: —</p>
+            <p id="difference" class="difference"></p>
+          </div>
+          <details class="ocr-details" open>
+            <summary>Vollständiger gescannter Text (OCR)</summary>
+            <pre id="ocr-text">Wird für dieses Bild gelesen …</pre>
+          </details>
+        </section>
+      </div>
+
+      <section class="card coordinate-card">
+        <div class="coordinate-heading">
+          <div><h2>Koordinaten für die Metadaten</h2><p id="chosen-coordinate">Wähle Bild- oder Adresskoordinaten oder gib die Schreibweise vom Bild ein.</p></div>
+          <span id="chosen-source" class="source-chip">Noch nicht gewählt</span>
+        </div>
+        <div class="coordinate-controls">
+          <button class="button secondary" id="use-image">Bildkoordinaten verwenden</button>
+          <button class="button secondary" id="use-address">Adresskoordinaten verwenden</button>
+          <label class="manual-coordinate-label">Koordinaten wie auf dem Bild
+            <input id="manual-coordinate" placeholder="46°33'53,892&quot;N 14°17'19,704&quot;E" autocomplete="off">
+            <small>Wenn nichts erkannt wurde: Unterstriche in der Vorlage durch die Zahlen vom Bild ersetzen.</small>
+          </label>
+          <button class="button secondary" id="apply-coordinate">Koordinaten übernehmen</button>
+        </div>
+      </section>
+
+      <section class="card map-card">
+        <div class="map-heading"><h2>Karte</h2><div class="legend"><span><i class="dot red"></i>Bildkoordinaten</span><span><i class="dot blue"></i>Adresskoordinaten</span><span><i class="dot purple"></i>Manuell gewählt</span></div></div>
+        <div id="map"></div>
+      </section>
+
+      <section class="batch-footer">
+        <span id="batch-info"></span>
+        <button class="button primary hidden" id="next-batch">Nächste 10 Bilder laden</button>
+      </section>
+    </section>
+
+    <footer>Browser-Verarbeitung · JPG im ersten Versuch · HTTPS-Verbindung erforderlich für Ordnerzugriff und Karte</footer>
+  </main>
+</body>
+</html>
