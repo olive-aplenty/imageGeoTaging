@@ -17,7 +17,7 @@
     empty: $("empty-state"), review: $("review"), previous: $("previous"), next: $("next"),
     counter: $("counter"), save: $("save"), reprocess: $("reprocess"), fileName: $("file-name"), imageStatus: $("image-status"),
     photo: $("photo"), imageButton: $("image-button"), openOriginal: $("open-original"),
-    rawCoordinate: $("raw-coordinate"), imageCoordinate: $("image-coordinate"),
+    imageCoordinate: $("image-coordinate"),
     candidates: $("address-candidates"), addressInput: $("address-input"), searchAddress: $("search-address"),
     addressCoordinate: $("address-coordinate"), difference: $("difference"), ocrText: $("ocr-text"),
     chosenCoordinate: $("chosen-coordinate"), chosenSource: $("chosen-source"), useImage: $("use-image"),
@@ -88,6 +88,7 @@
     ui.chosenCoordinate.textContent = `Wird gespeichert: ${formatCoordinate(item.coordinate)} · ${toDMS(item.coordinate.lat, true)} ${toDMS(item.coordinate.lon, false)}`;
     ui.imageStatus.textContent = item.status;
     ui.imageStatus.className = `status-chip ${item.approved ? "good" : ""}`;
+    updateCoordinateChoiceButtons(item);
     refreshMap(item);
     updateNavigation();
   }
@@ -108,6 +109,15 @@
     const sec = ((minutesValue - min) * 60).toFixed(3);
     const direction = latitude ? (value < 0 ? "S" : "N") : (value < 0 ? "W" : "E");
     return `${deg}° ${String(min).padStart(2, "0")}′ ${sec}″ ${direction}`;
+  }
+
+  function imageCoordinateLabel(item) {
+    if (item.imageCoordinate) {
+      return `${toDMS(item.imageCoordinate.lat, true)} ${toDMS(item.imageCoordinate.lon, false)}`;
+    }
+    return item.status === "pending"
+      ? "Koordinaten werden erkannt …"
+      : "Keine sichere Bildkoordinate erkannt. Bitte manuell prüfen oder Adresse suchen.";
   }
 
   function formatDMSInput(coordinate) {
@@ -169,12 +179,12 @@
     // Two layouts occur on the photos:
     //   suffix: 46°33'53,892"N 14°17'19,704"E      (hemisphere after the numbers)
     //   prefix: N 46° 33' 55", E 14° 17' 16"       (hemisphere before the numbers)
-    // OCR may drop or alter the °, ' and " marks, so any 1-3 junk characters (or
-    // plain spaces) are accepted between the number parts. All three numeric parts
-    // and a hemisphere are required, so a fragment like `7°04"E` never becomes a coordinate.
+    // Require recognizable degree and minute marks. Missing marks or OCR letters
+    // make a coordinate uncertain; treating arbitrary text as separators can invent values.
     const text = normalizeForCoordinates(rawText);
-    const sep = "(?:[ \\t]*[^\\d\\sNSEW]{1,3}[ \\t]*|[ \\t]+)";
-    const numbers = `(\\d{1,3})${sep}(\\d{1,2})${sep}(\\d{1,2}(?:[.,]\\d+|[ \\t]\\d{3,})?)`;
+    const degreeSep = "[ \\t]*[°º˚*][ \\t]*";
+    const minuteSep = "[ \\t]*'[ \\t]*";
+    const numbers = `(\\d{1,3})${degreeSep}(\\d{1,2})${minuteSep}(\\d{1,2}(?:[.,]\\d+|[ \\t]\\d{3,})?)`;
     const suffix = new RegExp(`(?<![\\d.,])${numbers}[ \\t]*["'°*:.]{0,2}[ \\t]*([NSEW])(?![A-Za-z])`, "gi");
     const prefix = new RegExp(`(?<![A-Za-z])([NSEW])[ \\t]*${numbers}(?!\\d)`, "gi");
 
@@ -205,14 +215,6 @@
 
   function validCoordinate(lat, lon) {
     return Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
-  }
-
-  function extractRawCoordinate(text) {
-    const decimal = text.match(/-?\d{1,2}[.,]\d{4,}\s*[NS][^\n\d]{0,24}-?\d{1,3}[.,]\d{4,}\s*[EW]/i);
-    if (decimal) return decimal[0].replace(/\s+/g, " ").trim();
-    const pair = findDMSPair(text);
-    if (pair) return `${pair.lat.raw} ${pair.lon.raw}`;
-    return "Koordinaten erkannt; OCR-Schreibweise nicht sicher lesbar";
   }
 
   // Postal code for the file name. Dates and times (31:07:2024, 01.08.2024 14:56)
@@ -534,8 +536,7 @@
     updateNavigation();
     ui.fileName.textContent = item.name;
     ui.ocrText.textContent = item.ocr || (item.status === "pending" ? "OCR wird für dieses Bild gestartet …" : "Kein OCR-Text gespeichert.");
-    ui.rawCoordinate.textContent = item.rawCoordinate || "Noch nicht erkannt";
-    ui.imageCoordinate.textContent = item.imageCoordinate ? `${formatCoordinate(item.imageCoordinate)} · ${toDMS(item.imageCoordinate.lat, true)} ${toDMS(item.imageCoordinate.lon, false)}` : "Keine Koordinaten erkannt";
+    ui.imageCoordinate.textContent = imageCoordinateLabel(item);
     ui.addressInput.value = item.address;
     ui.addressCoordinate.textContent = item.addressCoordinate ? `Koordinaten durch Adresse: ${formatCoordinate(item.addressCoordinate)}` : "Koordinaten durch Adresse: —";
     ui.difference.textContent = item.difference ? `Abweichung: ${Math.round(item.difference)} m` : "";
@@ -560,11 +561,23 @@
 
   function setSelectedDisplay(item) {
     ui.manualCoordinate.value = item.manualCoordinateText ?? "";
+    updateCoordinateChoiceButtons(item);
     ui.chosenSource.textContent = sourceLabel(item.source);
     ui.chosenCoordinate.textContent = item.coordinate ? `Wird gespeichert: ${formatCoordinate(item.coordinate)} · ${toDMS(item.coordinate.lat, true)} ${toDMS(item.coordinate.lon, false)}` : "Wähle Bild- oder Adresskoordinaten oder gib sie manuell ein.";
     ui.imageStatus.textContent = item.status === "saved" ? "Gespeichert · nach Erledigt verschoben" : item.status === "downloaded" ? item.statusLabel : item.status === "processed-file" ? item.statusLabel : item.status === "deferred" ? item.statusLabel : item.statusLabel ?? item.status;
     ui.imageStatus.className = `status-chip ${item.status === "saved" || item.approved ? "good" : "needs-check"}`;
     updateNavigation();
+  }
+
+  function updateCoordinateChoiceButtons(item) {
+    for (const [button, selected] of [
+      [ui.useImage, item.source === "image"],
+      [ui.useAddress, item.source === "address"],
+      [ui.applyCoordinate, item.source === "manual"]
+    ]) {
+      button.classList.toggle("choice-selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    }
   }
 
   async function recognize(item) {
@@ -605,7 +618,6 @@
         paperText && `Zettel / restliches Bild:\n${paperText}`
       ].filter(Boolean).join("\n\n");
       item.imageCoordinate = coordinate;
-      item.rawCoordinate = coordinate ? extractRawCoordinate(coordinateText) : "Keine Bildkoordinaten erkannt";
       item.addressCandidates = mergeAddressCandidates(extractAddresses(overlay.text), extractAddresses(paperText));
       item.address = item.addressCandidates[0] ?? "";
       if (!item.imageCoordinate && !item.manualCoordinateText) item.manualCoordinateText = "__°__'__,___\"N ___°__'__,___\"E";
@@ -621,8 +633,7 @@
       if (!item.imageCoordinate && !item.address) item.statusLabel = "Keine sichere Adresse oder Koordinaten erkannt";
       if (currentItem() === item) {
         ui.ocrText.textContent = item.ocr ? cleanDisplayedOCR(item.ocr) : "Kein lesbarer Text erkannt.";
-        ui.rawCoordinate.textContent = item.rawCoordinate;
-        ui.imageCoordinate.textContent = item.imageCoordinate ? `${formatCoordinate(item.imageCoordinate)} · ${toDMS(item.imageCoordinate.lat, true)} ${toDMS(item.imageCoordinate.lon, false)}` : "Keine Koordinaten erkannt";
+        ui.imageCoordinate.textContent = imageCoordinateLabel(item);
         ui.addressInput.value = item.address;
         renderCandidates(item);
         setSelectedDisplay(item);
