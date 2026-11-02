@@ -6,11 +6,11 @@
   <meta name="theme-color" content="#17232f">
   <title>Picture GeoTagger Web</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="styles.css?v=2">
+  <link rel="stylesheet" href="styles.css?v=4">
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@6/dist/tesseract.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/piexifjs@1.0.4/piexif.js"></script>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script defer src="app.js?v=coords-dms-3"></script>
+  <script defer src="app.js?v=selected-coordinate-field-1"></script>
 </head>
 <body>
   <main class="app-shell">
@@ -90,15 +90,15 @@
 
       <section class="card coordinate-card">
         <div class="coordinate-heading">
-          <div><h2>Koordinaten für die Metadaten</h2><p id="chosen-coordinate">Wähle Bild- oder Adresskoordinaten oder gib die Schreibweise vom Bild ein.</p></div>
+          <div><h2>Koordinaten für die Metadaten</h2><p id="chosen-coordinate">Wähle Bild- oder Adresskoordinaten oder gib sie manuell ein.</p></div>
           <span id="chosen-source" class="source-chip">Noch nicht gewählt</span>
         </div>
         <div class="coordinate-controls">
           <button class="button secondary" id="use-image">Bildkoordinaten verwenden</button>
           <button class="button secondary" id="use-address">Adresskoordinaten verwenden</button>
-          <label class="manual-coordinate-label">Koordinaten wie auf dem Bild
+          <label class="manual-coordinate-label">Koordinaten eingeben oder korrigieren
             <input id="manual-coordinate" placeholder="46°33'53,892&quot;N 14°17'19,704&quot;E" autocomplete="off">
-            <small>Wenn nichts erkannt wurde: Unterstriche in der Vorlage durch die Zahlen vom Bild ersetzen.</small>
+            <small>Das Feld zeigt die gewählte Koordinate. Du kannst sie hier ändern und übernehmen.</small>
           </label>
           <button class="button secondary" id="apply-coordinate">Koordinaten übernehmen</button>
         </div>

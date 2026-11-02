@@ -5,7 +5,7 @@ Statische Browser-Version des Picture GeoTaggers. Der erste Prototyp richtet sic
 ## Aktueller Ablauf
 
 1. Über **Bilder hochladen** einen Ordner freigeben (falls unterstützt) oder in Safari JPG-Dateien auswählen.
-2. Die App zeigt höchstens zehn Bilder pro Gruppe und liest OCR nur für das gerade angezeigte Bild.
+2. Die App zeigt höchstens zehn Bilder pro Gruppe und liest OCR nur für das gerade angezeigte Bild. Die Texterkennung besteht aus zwei parallelen, gezielten Durchgängen: (a) die Einblendung (Datum, Koordinaten, Adresse) wird als Ausschnitt oben oder unten rechts gelesen, zuerst nur die weiße Schrift, danach als Graustufen-Fallback; die Position, die zuletzt funktioniert hat, wird beim nächsten Bild zuerst versucht. (b) Das verkleinerte Gesamtbild wird für die Papierzettel (Adresse) gelesen. Koordinaten werden mit Himmelsrichtung vor oder nach den Zahlen erkannt (`N 46° 33' 55", E 14° 17' 16"` und `46°33'53,892"N 14°17'19,704"E`). Die Adressvorschläge kommen zuerst aus der Einblendung, danach von den Zetteln.
 3. Die Adresssuche startet ausschließlich nach einem Klick auf **Adresse suchen**. Ergebnisse werden lokal im Browser zwischengespeichert und Adressanfragen mindestens eine Sekunde auseinandergehalten.
 4. Bildkoordinaten, Adresskoordinaten oder manuell eingegebene Koordinaten auswählen.
 5. Beim Speichern schreibt die App GPS-EXIF-Daten in eine neue JPEG-Datei. Bei Ordnerzugriff wird die Datei in `Erledigt` geschrieben; erst danach entfernt der Browser das Original aus dem Quellordner.

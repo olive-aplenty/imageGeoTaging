@@ -6,7 +6,7 @@
   const HISTORY_KEY = "picture-geotagger-web-processed-v1";
   const state = {
     items: [], batchStart: 0, currentIndex: 0, sourceDirectory: null,
-    outputDirectory: null, worker: null, map: null, markers: [],
+    outputDirectory: null, workersPromise: null, overlayHint: null, ocrProgress: { overlay: 0, paper: 0 }, map: null, markers: [],
     imageObjectURL: null, lastGeocodeAt: 0, current: null, ocrBusy: false, activeOCRItem: null
   };
   const $ = (id) => document.getElementById(id);
@@ -82,6 +82,8 @@
     item.source = source;
     item.approved = true;
     item.status = source === "manual" ? "Manuell angepasst" : `${source === "image" ? "Bild" : "Adresse"} gewählt`;
+    if (source !== "manual") item.manualCoordinateText = formatDMSInput(item.coordinate);
+    ui.manualCoordinate.value = item.manualCoordinateText ?? "";
     ui.chosenSource.textContent = sourceLabel(source);
     ui.chosenCoordinate.textContent = `Wird gespeichert: ${formatCoordinate(item.coordinate)} · ${toDMS(item.coordinate.lat, true)} ${toDMS(item.coordinate.lon, false)}`;
     ui.imageStatus.textContent = item.status;
@@ -108,9 +110,34 @@
     return `${deg}° ${String(min).padStart(2, "0")}′ ${sec}″ ${direction}`;
   }
 
+  function formatDMSInput(coordinate) {
+    const formatPart = (value, latitude) => {
+      const absolute = Math.abs(value);
+      const degrees = Math.floor(absolute);
+      const minuteValue = (absolute - degrees) * 60;
+      const minutes = Math.floor(minuteValue);
+      const seconds = ((minuteValue - minutes) * 60).toFixed(5).replace(".", ",");
+      const direction = latitude ? (value < 0 ? "S" : "N") : (value < 0 ? "W" : "E");
+      return `${degrees}°${String(minutes).padStart(2, "0")}'${seconds}\"${direction}`;
+    };
+    return `${formatPart(coordinate.lat, true)} ${formatPart(coordinate.lon, false)}`;
+  }
+
+  // OCR often garbles the tiny symbols (° ' ") and sometimes digits.
+  // Normalise the most common confusions before parsing coordinates.
+  function normalizeForCoordinates(text) {
+    return String(text ?? "")
+      .replace(/[′´’‘`]/g, "'")
+      .replace(/[″”“]/g, '"')
+      .replace(/[º˚]/g, "°")
+      .replace(/(?<=\d)[Oo](?=[\d°'",.\s])|(?<=[°'",.\s])[Oo](?=\d)/g, "0")
+      .replace(/(?<=\d)[Il|](?=\d)/g, "1");
+  }
+
   function parseCoordinate(text) {
     const dmsPair = findDMSPair(text);
     if (dmsPair) return { lat: dmsPair.lat.value, lon: dmsPair.lon.value };
+    text = normalizeForCoordinates(text);
     const labeled = text.match(/(?:lat|latitude)\s*[:=]?\s*(-?\d{1,2}[.,]\d+)\s*°?[^\n]{0,25}(?:lon|long|longitude)\s*[:=]?\s*(-?\d{1,3}[.,]\d+)/i);
     if (labeled) return validCoordinate(Number(labeled[1].replace(",", ".")), Number(labeled[2].replace(",", ".")));
     const decimal = text.match(/(-?\d{1,2}[.,]\d{4,})\s*([NS])[^\n\d]{0,24}(-?\d{1,3}[.,]\d{4,})\s*([EW])/i);
@@ -119,43 +146,61 @@
       const lon = Number(decimal[3].replace(",", ".")) * (decimal[4].toUpperCase() === "W" ? -1 : 1);
       return validCoordinate(lat, lon);
     }
+    const prefixed = text.match(/(?<![A-Za-z])([NS])\s*(\d{1,2}[.,]\d{4,})[^\n\dNSEW]{0,24}([EW])\s*(\d{1,3}[.,]\d{4,})/i);
+    if (prefixed) {
+      const lat = Number(prefixed[2].replace(",", ".")) * (prefixed[1].toUpperCase() === "S" ? -1 : 1);
+      const lon = Number(prefixed[4].replace(",", ".")) * (prefixed[3].toUpperCase() === "W" ? -1 : 1);
+      return validCoordinate(lat, lon);
+    }
+    const plain = text.match(/(?<![\d.,])(-?\d{1,2}\.\d{4,})\s*[,;]\s*(-?\d{1,3}\.\d{4,})(?!\d)/);
+    if (plain) return validCoordinate(Number(plain[1]), Number(plain[2]));
     return null;
   }
 
   function dmsToDecimal(degreesText, minutesText, secondsText, hemisphere) {
     const degrees = Number(degreesText);
     const minutes = Number(minutesText);
-    const seconds = Number(secondsText.replace(",", "."));
+    const seconds = Number(secondsText.replace(",", ".").replace(/[ \t]+/g, "."));
     if (minutes >= 60 || seconds >= 60) return NaN;
     return (degrees + minutes / 60 + seconds / 3600) * (/[SW]/i.test(hemisphere) ? -1 : 1);
   }
 
-  function findDMSPair(text) {
-    // OCR may drop or alter ° and minute marks, or split the pair across lines.
-    // Require all three numeric parts and a hemisphere for each token so an
-    // incomplete fragment such as `7°04\"E` can never become a coordinate.
-    const tokenPattern = /(?<![\d.,])(\d{1,3})\s*[°º˚]?\s*(\d{1,2})\s*['′´’:`]?\s*(\d{1,2}(?:[.,]\d+)?)\s*["″”]?\s*([NSEW])(?![A-Z])/gi;
-    const latitudes = [], longitudes = [];
-    for (const match of text.matchAll(tokenPattern)) {
-      const hemisphere = match[4].toUpperCase();
-      const value = dmsToDecimal(match[1], match[2], match[3], hemisphere);
-      if (!Number.isFinite(value)) continue;
-      const token = { value, raw: match[0].trim(), start: match.index, end: match.index + match[0].length };
-      if ((hemisphere === "N" || hemisphere === "S") && Math.abs(value) <= 90) latitudes.push(token);
-      if ((hemisphere === "E" || hemisphere === "W") && Math.abs(value) <= 180) longitudes.push(token);
-    }
-    let best = null;
-    for (const lat of latitudes) for (const lon of longitudes) {
-      const gap = lon.start >= lat.end ? lon.start - lat.end : lat.start >= lon.end ? lat.start - lon.end : 0;
-      if (gap > 80) continue;
-      if (!best || gap < best.gap) best = { lat, lon, gap };
-    }
-    return best;
-  }
+  function findDMSPair(rawText) {
+    // Two layouts occur on the photos:
+    //   suffix: 46°33'53,892"N 14°17'19,704"E      (hemisphere after the numbers)
+    //   prefix: N 46° 33' 55", E 14° 17' 16"       (hemisphere before the numbers)
+    // OCR may drop or alter the °, ' and " marks, so any 1-3 junk characters (or
+    // plain spaces) are accepted between the number parts. All three numeric parts
+    // and a hemisphere are required, so a fragment like `7°04"E` never becomes a coordinate.
+    const text = normalizeForCoordinates(rawText);
+    const sep = "(?:[ \\t]*[^\\d\\sNSEW]{1,3}[ \\t]*|[ \\t]+)";
+    const numbers = `(\\d{1,3})${sep}(\\d{1,2})${sep}(\\d{1,2}(?:[.,]\\d+|[ \\t]\\d{3,})?)`;
+    const suffix = new RegExp(`(?<![\\d.,])${numbers}[ \\t]*["'°*:.]{0,2}[ \\t]*([NSEW])(?![A-Za-z])`, "gi");
+    const prefix = new RegExp(`(?<![A-Za-z])([NSEW])[ \\t]*${numbers}(?!\\d)`, "gi");
 
-  function hasCoordinateOCRHints(text) {
-    const dmsFragments = text.match(/\d{1,2}\s*[°º˚]\s*\d{1,2}\s*['′´’]/g) ?? [];
-    return dmsFragments.length >= 2 || (dmsFragments.length >= 1 && /[NS]/i.test(text) && /[EW]/i.test(text));
+    const collect = (regex, hemisphereFirst) => {
+      const lat = [], lon = [];
+      for (const match of text.matchAll(regex)) {
+        const [h, d, m, s] = hemisphereFirst ? [match[1], match[2], match[3], match[4]] : [match[4], match[1], match[2], match[3]];
+        const hemisphere = h.toUpperCase();
+        const value = dmsToDecimal(d, m, s, hemisphere);
+        if (!Number.isFinite(value)) continue;
+        const token = { value, raw: match[0].trim(), start: match.index, end: match.index + match[0].length };
+        if ((hemisphere === "N" || hemisphere === "S") && Math.abs(value) <= 90) lat.push(token);
+        else if ((hemisphere === "E" || hemisphere === "W") && Math.abs(value) <= 180) lon.push(token);
+      }
+      return { lat, lon };
+    };
+    const closest = ({ lat, lon }) => {
+      let best = null;
+      for (const a of lat) for (const b of lon) {
+        const gap = b.start >= a.end ? b.start - a.end : a.start >= b.end ? a.start - b.end : 0;
+        if (gap > 100) continue;
+        if (!best || gap < best.gap) best = { lat: a, lon: b, gap };
+      }
+      return best;
+    };
+    return closest(collect(suffix, false)) ?? closest(collect(prefix, true));
   }
 
   function validCoordinate(lat, lon) {
@@ -170,6 +215,25 @@
     return "Koordinaten erkannt; OCR-Schreibweise nicht sicher lesbar";
   }
 
+  // Postal code for the file name. Dates and times (31:07:2024, 01.08.2024 14:56)
+  // are removed first, otherwise the year 2024 was mistaken for a postal code.
+  function findPostalCode(text) {
+    const cleaned = String(text ?? "")
+      .replace(/\d{1,2}[.:\-/]\d{1,2}[.:\-/]\d{2,4}(?:[ \t]+\d{1,2}[:.]\d{2}(?:[:.]\d{2})?)?/g, " ")
+      .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ");
+    return cleaned.match(/(?<![\d.,/-])([1-9]\d{3})(?![\d.,/-])/)?.[1] ?? "";
+  }
+
+  function mergeAddressCandidates(...lists) {
+    const seen = new Set();
+    const merged = [];
+    for (const list of lists) for (const entry of list) {
+      const key = entry.toLowerCase();
+      if (!seen.has(key)) { seen.add(key); merged.push(entry); }
+    }
+    return merged;
+  }
+
   function extractAddresses(text) {
     const seen = new Set();
     const candidates = [];
@@ -179,7 +243,7 @@
     for (const line of text.split(/\r?\n/).map((entry) => entry.trim())) {
       const normalized = line
         .replace(/\bglsterweg\b/gi, "Elsterweg")
-        .replace(/strare\b/gi, "straße")
+        .replace(/stra(?:ss|s|f|fs|r)e\b/gi, "straße")
         .replace(/strasse\b/gi, "straße");
       for (const match of normalized.matchAll(roadThenNumber)) candidates.push(`${match[1]} ${match[2]}`);
       for (const match of normalized.matchAll(numberThenRoad)) candidates.push(`${match[2]} ${match[1]}`);
@@ -275,6 +339,7 @@
     if (!items.length) { setStatus("Im ausgewählten Ordner wurden keine JPG-Bilder gefunden.", 0); return; }
     setStatus(`${items.length} JPG-Bilder gefunden. Es werden immer nur bis zu ${BATCH_SIZE} in einer Gruppe bearbeitet.`, 0);
     updateNavigation();
+    void getWorkers().catch(() => {}); // start loading OCR engine + language data while the first image opens
     void showCurrent();
   }
 
@@ -314,40 +379,147 @@
     throw new Error("Die Bilddatei ist nicht mehr verfügbar.");
   }
 
-  async function getWorker() {
-    if (state.worker) return state.worker;
-    if (!window.Tesseract?.createWorker) throw new Error("OCR-Modul konnte nicht geladen werden. Prüfe die Internetverbindung und lade die Seite neu.");
-    state.worker = await Tesseract.createWorker("deu+eng+rus", 1, {
+  // ---- OCR pipeline -------------------------------------------------------
+  // Two small, targeted passes instead of one big full-image pass:
+  //  1. "overlay": the GPS text block (date, coordinates, address) is cropped from the
+  //     right side of the top or bottom edge. White text is isolated first (clean and fast);
+  //     a grayscale variant is the fallback. The position that worked is tried first next time.
+  //  2. "paper": the whole photo, downscaled, read in sparse mode for the paper notes
+  //     ("Elsterweg 5", "Fasanstraße 7", ...). Large black text survives downscaling well.
+  // Both passes run in parallel in two Tesseract workers.
+  const OVERLAY_ATTEMPTS = [
+    { key: "top-white", box: { x: 0.28, y: 0, w: 0.72, h: 0.26 }, mode: "white" },
+    { key: "bottom-white", box: { x: 0.28, y: 0.74, w: 0.72, h: 0.26 }, mode: "white" },
+    { key: "top-gray", box: { x: 0, y: 0, w: 1, h: 0.26 }, mode: "gray" },
+    { key: "bottom-gray", box: { x: 0, y: 0.74, w: 1, h: 0.26 }, mode: "gray" }
+  ];
+  const OVERLAY_TARGET_WIDTH = 1000;
+  const PAPER_MAX_SIDE = 1100;
+
+  function createOCRWorker(slot) {
+    return Tesseract.createWorker("deu+eng", 1, {
       logger: (event) => {
         if (state.activeOCRItem !== currentItem()) return;
-        if (event.status === "recognizing text") setStatus("Text wird gelesen …", Math.round((event.progress ?? 0) * 100));
-        else if (event.status === "loading language traineddata") setStatus("OCR-Sprachdaten werden einmalig geladen …", Math.round((event.progress ?? 0) * 100));
+        const progress = event.progress ?? 0;
+        if (event.status === "loading language traineddata") {
+          setStatus("OCR-Sprachdaten werden einmalig geladen …", Math.round(progress * 30));
+        } else if (event.status === "recognizing text") {
+          state.ocrProgress[slot] = progress;
+          setStatus("Text und Koordinaten werden gelesen …", Math.round(30 + (state.ocrProgress.overlay + state.ocrProgress.paper) * 35));
+        }
       }
     });
-    return state.worker;
   }
 
-  async function enlargedOCRImage(file) {
-    const url = URL.createObjectURL(file);
-    try {
-      const image = new Image();
-      const loaded = new Promise((resolve, reject) => {
-        image.onload = resolve;
-        image.onerror = () => reject(new Error("Bild konnte für den zusätzlichen OCR-Durchgang nicht geöffnet werden."));
-      });
-      image.src = url;
-      await loaded;
-      const scale = Math.min(1.3, Math.max(1, 1800 / Math.max(image.naturalWidth, image.naturalHeight)));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(image.naturalWidth * scale);
-      canvas.height = Math.round(image.naturalHeight * scale);
-      const context = canvas.getContext("2d");
-      context.filter = "grayscale(1) contrast(1.2)";
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      return canvas;
-    } finally {
-      URL.revokeObjectURL(url);
+  function getWorkers() {
+    if (state.workersPromise) return state.workersPromise;
+    if (!window.Tesseract?.createWorker) {
+      return Promise.reject(new Error("OCR-Modul konnte nicht geladen werden. Prüfe die Internetverbindung und lade die Seite neu."));
     }
+    state.workersPromise = (async () => {
+      const overlay = await createOCRWorker("overlay");
+      let paper;
+      try { paper = await createOCRWorker("paper"); }
+      catch { paper = overlay; } // low memory: share one worker and run the passes one after another
+      return { overlay, paper, shared: paper === overlay };
+    })().catch((error) => { state.workersPromise = null; throw error; });
+    return state.workersPromise;
+  }
+
+  async function runOCR(worker, canvas, pageSegMode) {
+    if (worker.__psm !== pageSegMode) {
+      await worker.setParameters({ tessedit_pageseg_mode: pageSegMode, user_defined_dpi: "300" });
+      worker.__psm = pageSegMode;
+    }
+    const result = await worker.recognize(canvas);
+    return (result.data.text ?? "").trim();
+  }
+
+  async function loadImage(file) {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    try {
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("Bild konnte für die Texterkennung nicht geöffnet werden."));
+        image.src = url;
+      });
+      if (image.decode) await image.decode().catch(() => {});
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      throw error;
+    }
+    return { image, release: () => URL.revokeObjectURL(url) };
+  }
+
+  function applyFilter(context, canvas, mode) {
+    const data = context.getImageData(0, 0, canvas.width, canvas.height);
+    const px = data.data;
+    if (mode === "white") {
+      // Overlay text is white: keep only near-white pixels (black text on white result).
+      for (let i = 0; i < px.length; i += 4) {
+        const value = Math.min(px[i], px[i + 1], px[i + 2]) > 190 ? 0 : 255;
+        px[i] = px[i + 1] = px[i + 2] = value;
+        px[i + 3] = 255;
+      }
+    } else {
+      const histogram = new Uint32Array(256);
+      const total = px.length / 4;
+      for (let i = 0; i < px.length; i += 4) {
+        const gray = Math.round(0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2]);
+        px[i] = gray;
+        histogram[gray] += 1;
+      }
+      let accumulated = 0, low = 0, high = 255;
+      for (let v = 0; v < 256; v += 1) { accumulated += histogram[v]; if (accumulated >= total * 0.02) { low = v; break; } }
+      accumulated = 0;
+      for (let v = 255; v >= 0; v -= 1) { accumulated += histogram[v]; if (accumulated >= total * 0.02) { high = v; break; } }
+      const range = Math.max(1, high - low);
+      for (let i = 0; i < px.length; i += 4) {
+        const value = Math.max(0, Math.min(255, Math.round((px[i] - low) * 255 / range)));
+        px[i] = px[i + 1] = px[i + 2] = value;
+        px[i + 3] = 255;
+      }
+    }
+    context.putImageData(data, 0, 0);
+  }
+
+  function cropCanvas(image, box, mode, { maxSide = 0 } = {}) {
+    const sx = Math.round(image.naturalWidth * box.x), sy = Math.round(image.naturalHeight * box.y);
+    const sw = Math.max(1, Math.round(image.naturalWidth * box.w)), sh = Math.max(1, Math.round(image.naturalHeight * box.h));
+    const scale = maxSide
+      ? Math.min(1, maxSide / Math.max(sw, sh))
+      : Math.max(0.2, Math.min(2, OVERLAY_TARGET_WIDTH / sw));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(sw * scale));
+    canvas.height = Math.max(1, Math.round(sh * scale));
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Bildbereich konnte nicht vorbereitet werden.");
+    context.imageSmoothingQuality = "high";
+    context.drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    applyFilter(context, canvas, mode);
+    return canvas;
+  }
+
+  async function readOverlay(worker, image) {
+    const hinted = OVERLAY_ATTEMPTS.find((attempt) => attempt.key === state.overlayHint);
+    const attempts = hinted ? [hinted, ...OVERLAY_ATTEMPTS.filter((attempt) => attempt !== hinted)] : OVERLAY_ATTEMPTS;
+    const texts = [];
+    for (const attempt of attempts) {
+      const text = await runOCR(worker, cropCanvas(image, attempt.box, attempt.mode), "6");
+      if (text) texts.push(text);
+      const coordinate = parseCoordinate(text);
+      if (coordinate) {
+        state.overlayHint = attempt.key;
+        return { text, coordinate, coordinateText: text };
+      }
+    }
+    return { text: texts.join("\n"), coordinate: null, coordinateText: "" };
+  }
+
+  function readPaper(worker, image) {
+    const canvas = cropCanvas(image, { x: 0, y: 0, w: 1, h: 1 }, "gray", { maxSide: PAPER_MAX_SIDE });
+    return runOCR(worker, canvas, "11");
   }
 
   async function showCurrent() {
@@ -403,43 +575,48 @@
     }
     state.ocrBusy = true;
     state.activeOCRItem = item;
+    state.ocrProgress = { overlay: 0, paper: 0 };
     item.busy = true;
     setStatus(`Lese Bild ${state.currentIndex + 1} von ${batchEnd() - state.batchStart} …`, 0);
     updateNavigation();
+    let loaded = null;
     try {
       const file = await getFile(item);
-      const worker = await getWorker();
-      const result = await worker.recognize(file);
-      item.ocr = (result.data.text ?? "").trim();
-      item.imageCoordinate = parseCoordinate(item.ocr);
-      let coordinateOCR = item.ocr;
-      if (!item.imageCoordinate && hasCoordinateOCRHints(item.ocr)) {
-        try {
-          if (currentItem() === item) setStatus("Koordinatenhinweis gefunden · prüfe das Bild vergrößert …", 55);
-          const enlarged = await enlargedOCRImage(file);
-          const retry = await worker.recognize(enlarged);
-          const retryText = (retry.data.text ?? "").trim();
-          const retryCoordinate = parseCoordinate(retryText);
-          if (retryCoordinate) {
-            item.imageCoordinate = retryCoordinate;
-            coordinateOCR = retryText;
-          }
-        } catch (retryError) {
-          console.info("Zusätzlicher Koordinaten-OCR-Durchgang nicht verfügbar:", retryError);
-        }
+      const workers = await getWorkers();
+      loaded = await loadImage(file);
+      let overlay, paperText;
+      if (workers.shared) {
+        overlay = await readOverlay(workers.overlay, loaded.image);
+        paperText = await readPaper(workers.paper, loaded.image);
+      } else {
+        [overlay, paperText] = await Promise.all([
+          readOverlay(workers.overlay, loaded.image),
+          readPaper(workers.paper, loaded.image)
+        ]);
       }
-      item.rawCoordinate = item.imageCoordinate ? extractRawCoordinate(coordinateOCR) : "Keine Bildkoordinaten erkannt";
-      item.addressCandidates = extractAddresses(item.ocr);
+      let coordinate = overlay.coordinate;
+      let coordinateText = overlay.coordinateText;
+      if (!coordinate) {
+        const fromPaperPass = parseCoordinate(paperText);
+        if (fromPaperPass) { coordinate = fromPaperPass; coordinateText = paperText; }
+      }
+      item.ocr = [
+        overlay.text && `Bild-Einblendung:\n${overlay.text}`,
+        paperText && `Zettel / restliches Bild:\n${paperText}`
+      ].filter(Boolean).join("\n\n");
+      item.imageCoordinate = coordinate;
+      item.rawCoordinate = coordinate ? extractRawCoordinate(coordinateText) : "Keine Bildkoordinaten erkannt";
+      item.addressCandidates = mergeAddressCandidates(extractAddresses(overlay.text), extractAddresses(paperText));
       item.address = item.addressCandidates[0] ?? "";
       if (!item.imageCoordinate && !item.manualCoordinateText) item.manualCoordinateText = "__°__'__,___\"N ___°__'__,___\"E";
-      const postal = item.ocr.match(/\b([1-9]\d{3})\b/);
-      item.postalCode = postal?.[1] ?? "";
+      item.postalCode = findPostalCode(overlay.text) || findPostalCode(paperText);
       item.status = "ready";
       item.statusLabel = item.imageCoordinate ? "Bildkoordinaten erkannt" : "Adresse und Koordinaten prüfen";
       item.approved = Boolean(item.imageCoordinate);
       if (item.imageCoordinate) {
         item.coordinate = { ...item.imageCoordinate };
         item.source = "image";
+        item.manualCoordinateText = formatDMSInput(item.imageCoordinate);
       }
       if (!item.imageCoordinate && !item.address) item.statusLabel = "Keine sichere Adresse oder Koordinaten erkannt";
       if (currentItem() === item) {
@@ -460,6 +637,7 @@
         setSelectedDisplay(item);
       }
     } finally {
+      loaded?.release();
       item.busy = false;
       state.ocrBusy = false;
       state.activeOCRItem = null;
@@ -547,6 +725,7 @@
       item.busy = false;
       updateNavigation();
     }
+  }
 
   function reprocessCurrent() {
     const item = currentItem();
@@ -563,7 +742,6 @@
     item.source = null;
     item.approved = false;
     void showCurrent();
-  }
   }
 
   function applyManualCoordinate() {
@@ -759,6 +937,6 @@
 
   window.addEventListener("beforeunload", () => {
     if (state.imageObjectURL) URL.revokeObjectURL(state.imageObjectURL);
-    if (state.worker) void state.worker.terminate();
+    state.workersPromise?.then(({ overlay, paper }) => { void overlay.terminate(); if (paper !== overlay) void paper.terminate(); }).catch(() => {});
   });
 })();
